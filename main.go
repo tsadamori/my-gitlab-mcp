@@ -194,6 +194,138 @@ func registerTools(s *server.MCPServer) {
 		),
 		handleGetFile,
 	)
+
+	// ファイル作成/更新
+	s.AddTool(
+		mcp.NewTool("create_or_update_file",
+			mcp.WithDescription("Create or update a file in a GitLab repository"),
+			mcp.WithString("project_id",
+				mcp.Required(),
+				mcp.Description("Project ID or path"),
+			),
+			mcp.WithString("file_path",
+				mcp.Required(),
+				mcp.Description("Path to the file in the repository"),
+			),
+			mcp.WithString("branch",
+				mcp.Required(),
+				mcp.Description("Branch name to commit to"),
+			),
+			mcp.WithString("content",
+				mcp.Required(),
+				mcp.Description("File content"),
+			),
+			mcp.WithString("commit_message",
+				mcp.Required(),
+				mcp.Description("Commit message"),
+			),
+			mcp.WithString("author_email",
+				mcp.Description("Author email for the commit"),
+			),
+			mcp.WithString("author_name",
+				mcp.Description("Author name for the commit"),
+			),
+		),
+		handleCreateOrUpdateFile,
+	)
+
+	// ファイル削除
+	s.AddTool(
+		mcp.NewTool("delete_file",
+			mcp.WithDescription("Delete a file from a GitLab repository"),
+			mcp.WithString("project_id",
+				mcp.Required(),
+				mcp.Description("Project ID or path"),
+			),
+			mcp.WithString("file_path",
+				mcp.Required(),
+				mcp.Description("Path to the file to delete"),
+			),
+			mcp.WithString("branch",
+				mcp.Required(),
+				mcp.Description("Branch name to commit to"),
+			),
+			mcp.WithString("commit_message",
+				mcp.Required(),
+				mcp.Description("Commit message"),
+			),
+			mcp.WithString("author_email",
+				mcp.Description("Author email for the commit"),
+			),
+			mcp.WithString("author_name",
+				mcp.Description("Author name for the commit"),
+			),
+		),
+		handleDeleteFile,
+	)
+
+	// ブランチ作成
+	s.AddTool(
+		mcp.NewTool("create_branch",
+			mcp.WithDescription("Create a new branch in a GitLab repository"),
+			mcp.WithString("project_id",
+				mcp.Required(),
+				mcp.Description("Project ID or path"),
+			),
+			mcp.WithString("branch",
+				mcp.Required(),
+				mcp.Description("Name of the new branch"),
+			),
+			mcp.WithString("ref",
+				mcp.Required(),
+				mcp.Description("Branch name or commit SHA to create branch from"),
+			),
+		),
+		handleCreateBranch,
+	)
+
+	// ブランチ一覧取得
+	s.AddTool(
+		mcp.NewTool("list_branches",
+			mcp.WithDescription("List branches in a GitLab repository"),
+			mcp.WithString("project_id",
+				mcp.Required(),
+				mcp.Description("Project ID or path"),
+			),
+			mcp.WithString("search",
+				mcp.Description("Search branches by name"),
+			),
+			mcp.WithNumber("per_page",
+				mcp.Description("Number of branches per page (default: 20)"),
+			),
+		),
+		handleListBranches,
+	)
+
+	// 複数ファイルを一度にPush
+	s.AddTool(
+		mcp.NewTool("push_files",
+			mcp.WithDescription("Push multiple files to a GitLab repository in a single commit"),
+			mcp.WithString("project_id",
+				mcp.Required(),
+				mcp.Description("Project ID or path"),
+			),
+			mcp.WithString("branch",
+				mcp.Required(),
+				mcp.Description("Branch to push to"),
+			),
+			mcp.WithString("commit_message",
+				mcp.Required(),
+				mcp.Description("Commit message"),
+			),
+			mcp.WithArray("files",
+				mcp.Required(),
+				mcp.Description("Array of file objects with 'path' and 'content' fields"),
+			),
+			mcp.WithString("author_email",
+				mcp.Description("Author email for the commit"),
+			),
+			mcp.WithString("author_name",
+				mcp.Description("Author name for the commit"),
+			),
+		),
+		handlePushFiles,
+	)
 }
 
 // ツールハンドラー
@@ -489,6 +621,313 @@ func handleGetFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolR
 		"content":   content,
 	}
 
+	return jsonResult(result)
+}
+
+func handleCreateOrUpdateFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+	projectID, ok := args["project_id"].(string)
+	if !ok || projectID == "" {
+		return mcp.NewToolResultError("project_id is required"), nil
+	}
+
+	filePath, ok := args["file_path"].(string)
+	if !ok || filePath == "" {
+		return mcp.NewToolResultError("file_path is required"), nil
+	}
+
+	branch, ok := args["branch"].(string)
+	if !ok || branch == "" {
+		return mcp.NewToolResultError("branch is required"), nil
+	}
+
+	content, ok := args["content"].(string)
+	if !ok {
+		return mcp.NewToolResultError("content is required"), nil
+	}
+
+	commitMessage, ok := args["commit_message"].(string)
+	if !ok || commitMessage == "" {
+		return mcp.NewToolResultError("commit_message is required"), nil
+	}
+
+	// ファイルが存在するかチェック
+	_, resp, err := gitlabClient.RepositoryFiles.GetFile(projectID, filePath, &gitlab.GetFileOptions{
+		Ref: gitlab.Ptr(branch),
+	})
+
+	fileExists := err == nil && resp.StatusCode == 200
+
+	if fileExists {
+		// ファイル更新
+		opts := &gitlab.UpdateFileOptions{
+			Branch:        gitlab.Ptr(branch),
+			Content:       gitlab.Ptr(content),
+			CommitMessage: gitlab.Ptr(commitMessage),
+		}
+
+		if authorEmail := getString(args, "author_email", ""); authorEmail != "" {
+			opts.AuthorEmail = gitlab.Ptr(authorEmail)
+		}
+		if authorName := getString(args, "author_name", ""); authorName != "" {
+			opts.AuthorName = gitlab.Ptr(authorName)
+		}
+
+		fileResp, _, err := gitlabClient.RepositoryFiles.UpdateFile(projectID, filePath, opts)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to update file: %v", err)), nil
+		}
+
+		result := map[string]interface{}{
+			"action":    "updated",
+			"file_path": fileResp.FilePath,
+			"branch":    fileResp.Branch,
+		}
+		return jsonResult(result)
+	} else {
+		// ファイル作成
+		opts := &gitlab.CreateFileOptions{
+			Branch:        gitlab.Ptr(branch),
+			Content:       gitlab.Ptr(content),
+			CommitMessage: gitlab.Ptr(commitMessage),
+		}
+
+		if authorEmail := getString(args, "author_email", ""); authorEmail != "" {
+			opts.AuthorEmail = gitlab.Ptr(authorEmail)
+		}
+		if authorName := getString(args, "author_name", ""); authorName != "" {
+			opts.AuthorName = gitlab.Ptr(authorName)
+		}
+
+		fileResp, _, err := gitlabClient.RepositoryFiles.CreateFile(projectID, filePath, opts)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Failed to create file: %v", err)), nil
+		}
+
+		result := map[string]interface{}{
+			"action":    "created",
+			"file_path": fileResp.FilePath,
+			"branch":    fileResp.Branch,
+		}
+		return jsonResult(result)
+	}
+}
+
+func handleDeleteFile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+	projectID, ok := args["project_id"].(string)
+	if !ok || projectID == "" {
+		return mcp.NewToolResultError("project_id is required"), nil
+	}
+
+	filePath, ok := args["file_path"].(string)
+	if !ok || filePath == "" {
+		return mcp.NewToolResultError("file_path is required"), nil
+	}
+
+	branch, ok := args["branch"].(string)
+	if !ok || branch == "" {
+		return mcp.NewToolResultError("branch is required"), nil
+	}
+
+	commitMessage, ok := args["commit_message"].(string)
+	if !ok || commitMessage == "" {
+		return mcp.NewToolResultError("commit_message is required"), nil
+	}
+
+	opts := &gitlab.DeleteFileOptions{
+		Branch:        gitlab.Ptr(branch),
+		CommitMessage: gitlab.Ptr(commitMessage),
+	}
+
+	if authorEmail := getString(args, "author_email", ""); authorEmail != "" {
+		opts.AuthorEmail = gitlab.Ptr(authorEmail)
+	}
+	if authorName := getString(args, "author_name", ""); authorName != "" {
+		opts.AuthorName = gitlab.Ptr(authorName)
+	}
+
+	_, err := gitlabClient.RepositoryFiles.DeleteFile(projectID, filePath, opts)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to delete file: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"action":    "deleted",
+		"file_path": filePath,
+		"branch":    branch,
+	}
+	return jsonResult(result)
+}
+
+func handleCreateBranch(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+	projectID, ok := args["project_id"].(string)
+	if !ok || projectID == "" {
+		return mcp.NewToolResultError("project_id is required"), nil
+	}
+
+	branchName, ok := args["branch"].(string)
+	if !ok || branchName == "" {
+		return mcp.NewToolResultError("branch is required"), nil
+	}
+
+	ref, ok := args["ref"].(string)
+	if !ok || ref == "" {
+		return mcp.NewToolResultError("ref is required"), nil
+	}
+
+	opts := &gitlab.CreateBranchOptions{
+		Branch: gitlab.Ptr(branchName),
+		Ref:    gitlab.Ptr(ref),
+	}
+
+	branch, _, err := gitlabClient.Branches.CreateBranch(projectID, opts)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to create branch: %v", err)), nil
+	}
+
+	result := map[string]interface{}{
+		"name":      branch.Name,
+		"commit":    branch.Commit.ID,
+		"protected": branch.Protected,
+		"web_url":   branch.WebURL,
+	}
+	return jsonResult(result)
+}
+
+func handleListBranches(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+	projectID, ok := args["project_id"].(string)
+	if !ok || projectID == "" {
+		return mcp.NewToolResultError("project_id is required"), nil
+	}
+
+	perPage := getInt(args, "per_page", 20)
+	search := getString(args, "search", "")
+
+	opts := &gitlab.ListBranchesOptions{
+		ListOptions: gitlab.ListOptions{
+			PerPage: perPage,
+		},
+	}
+	if search != "" {
+		opts.Search = gitlab.Ptr(search)
+	}
+
+	branches, _, err := gitlabClient.Branches.ListBranches(projectID, opts)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to list branches: %v", err)), nil
+	}
+
+	result := make([]map[string]interface{}, len(branches))
+	for i, b := range branches {
+		result[i] = map[string]interface{}{
+			"name":      b.Name,
+			"commit":    b.Commit.ID,
+			"protected": b.Protected,
+			"default":   b.Default,
+			"web_url":   b.WebURL,
+		}
+	}
+
+	return jsonResult(result)
+}
+
+func handlePushFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := req.Params.Arguments
+	projectID, ok := args["project_id"].(string)
+	if !ok || projectID == "" {
+		return mcp.NewToolResultError("project_id is required"), nil
+	}
+
+	branch, ok := args["branch"].(string)
+	if !ok || branch == "" {
+		return mcp.NewToolResultError("branch is required"), nil
+	}
+
+	commitMessage, ok := args["commit_message"].(string)
+	if !ok || commitMessage == "" {
+		return mcp.NewToolResultError("commit_message is required"), nil
+	}
+
+	filesArg, ok := args["files"].([]interface{})
+	if !ok || len(filesArg) == 0 {
+		return mcp.NewToolResultError("files is required and must be a non-empty array"), nil
+	}
+
+	// CommitActionsを構築
+	var actions []*gitlab.CommitActionOptions
+	for _, f := range filesArg {
+		fileMap, ok := f.(map[string]interface{})
+		if !ok {
+			return mcp.NewToolResultError("each file must be an object with 'path' and 'content' fields"), nil
+		}
+
+		filePath, ok := fileMap["path"].(string)
+		if !ok || filePath == "" {
+			return mcp.NewToolResultError("each file must have a 'path' field"), nil
+		}
+
+		content, ok := fileMap["content"].(string)
+		if !ok {
+			return mcp.NewToolResultError("each file must have a 'content' field"), nil
+		}
+
+		// ファイルが存在するかチェックしてアクションを決定
+		_, resp, err := gitlabClient.RepositoryFiles.GetFile(projectID, filePath, &gitlab.GetFileOptions{
+			Ref: gitlab.Ptr(branch),
+		})
+
+		var action gitlab.FileActionValue
+		if err == nil && resp.StatusCode == 200 {
+			action = gitlab.FileUpdate
+		} else {
+			action = gitlab.FileCreate
+		}
+
+		actions = append(actions, &gitlab.CommitActionOptions{
+			Action:   gitlab.Ptr(action),
+			FilePath: gitlab.Ptr(filePath),
+			Content:  gitlab.Ptr(content),
+		})
+	}
+
+	// コミットオプションを構築
+	opts := &gitlab.CreateCommitOptions{
+		Branch:        gitlab.Ptr(branch),
+		CommitMessage: gitlab.Ptr(commitMessage),
+		Actions:       actions,
+	}
+
+	if authorEmail := getString(args, "author_email", ""); authorEmail != "" {
+		opts.AuthorEmail = gitlab.Ptr(authorEmail)
+	}
+	if authorName := getString(args, "author_name", ""); authorName != "" {
+		opts.AuthorName = gitlab.Ptr(authorName)
+	}
+
+	// コミットを作成
+	commit, _, err := gitlabClient.Commits.CreateCommit(projectID, opts)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("Failed to push files: %v", err)), nil
+	}
+
+	// プッシュされたファイルのパスを収集
+	var pushedFiles []string
+	for _, a := range actions {
+		pushedFiles = append(pushedFiles, *a.FilePath)
+	}
+
+	result := map[string]interface{}{
+		"commit_id":     commit.ID,
+		"commit_sha":    commit.ShortID,
+		"message":       commit.Message,
+		"branch":        branch,
+		"files_pushed":  pushedFiles,
+		"files_count":   len(pushedFiles),
+		"web_url":       commit.WebURL,
+	}
 	return jsonResult(result)
 }
 
